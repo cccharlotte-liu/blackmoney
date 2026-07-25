@@ -128,28 +128,55 @@ exports.handler = async function(event) {
       const body = JSON.parse(event.body || '{}');
       const { holdings, trades } = body;
 
-      // 清空並重寫持倉
-      const holdingValues = holdings.map(h => [h.cd, h.name, h.sh, h.buy]);
-      // 清空並重寫交易記錄
-      const tradeValues = trades.map(t => [t.dt, t.cd, t.tp, t.sh, t.am]);
+      if (!holdings || !trades) {
+        return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ success: false, error: '缺少資料' }) };
+      }
 
-      await Promise.all([
-        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/持倉!A2:D?valueInputOption=RAW`, {
-          method: 'PUT',
-          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ values: holdingValues.length ? holdingValues : [[]] }),
-        }),
-        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/交易記錄!A2:E?valueInputOption=RAW`, {
-          method: 'PUT',
-          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ values: tradeValues.length ? tradeValues : [[]] }),
-        }),
+      const holdingValues = holdings.map(h => [h.cd || '', h.name || '', h.sh || 0, h.buy || 0]);
+      const tradeValues = trades.map(t => [t.dt || '', t.cd || '', t.tp || 'buy', t.sh || 0, t.am || 0]);
+
+      const writeRange = async (sheetName, range, values) => {
+        // 用 batchUpdate 清空後再寫入
+        const encoded = encodeURIComponent(sheetName + '!' + range);
+
+        // 先清空整個範圍
+        const clearResp = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encoded}:clear`,
+          {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+          }
+        );
+        const clearData = await clearResp.json();
+        if (!clearResp.ok) throw new Error(`清空失敗: ${JSON.stringify(clearData)}`);
+
+        // 若有資料則寫入
+        if (values.length > 0) {
+          const writeResp = await fetch(
+            `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encoded}?valueInputOption=RAW`,
+            {
+              method: 'PUT',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ range: sheetName + '!' + range, values }),
+            }
+          );
+          const writeData = await writeResp.json();
+          if (!writeResp.ok) throw new Error(`寫入失敗: ${JSON.stringify(writeData)}`);
+          return writeData;
+        }
+        return clearData;
+      };
+
+      const [h, t] = await Promise.all([
+        writeRange('持倉', 'A2:D1000', holdingValues),
+        writeRange('交易記錄', 'A2:E10000', tradeValues),
       ]);
 
       return {
         statusCode: 200,
         headers: corsHeaders,
-        body: JSON.stringify({ success: true }),
+        body: JSON.stringify({ success: true, saved: { holdings: holdingValues.length, trades: tradeValues.length } }),
       };
     }
 
