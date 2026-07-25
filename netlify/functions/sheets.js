@@ -90,10 +90,10 @@ exports.handler = async function(event) {
     // 讀取資料
     if (action === 'read') {
       const [holdingsResp, tradesResp] = await Promise.all([
-        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/持倉!A2:D`, {
+        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent("'持倉'!A2:D")}`, {
           headers: { Authorization: `Bearer ${token}` }
         }),
-        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/交易記錄!A2:E`, {
+        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent("'交易記錄'!A2:E")}`, {
           headers: { Authorization: `Bearer ${token}` }
         }),
       ]);
@@ -136,12 +136,12 @@ exports.handler = async function(event) {
       const tradeValues = trades.map(t => [t.dt || '', t.cd || '', t.tp || 'buy', t.sh || 0, t.am || 0]);
 
       const writeRange = async (sheetName, range, values) => {
-        // 用 batchUpdate 清空後再寫入
-        const encoded = encodeURIComponent(sheetName + '!' + range);
+        // 中文工作表名稱需加單引號並 encode
+        const fullRange = encodeURIComponent(`'${sheetName}'!${range}`);
 
-        // 先清空整個範圍
+        // 先清空
         const clearResp = await fetch(
-          `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encoded}:clear`,
+          `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${fullRange}:clear`,
           {
             method: 'POST',
             headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -154,11 +154,11 @@ exports.handler = async function(event) {
         // 若有資料則寫入
         if (values.length > 0) {
           const writeResp = await fetch(
-            `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encoded}?valueInputOption=RAW`,
+            `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${fullRange}?valueInputOption=RAW`,
             {
               method: 'PUT',
               headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ range: sheetName + '!' + range, values }),
+              body: JSON.stringify({ range: `'${sheetName}'!${range}`, values }),
             }
           );
           const writeData = await writeResp.json();
