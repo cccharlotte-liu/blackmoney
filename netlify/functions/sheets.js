@@ -29,205 +29,106 @@ xiajEK849hdZN+1GZNX4ryAKTgYgnwFcUWjDppHK4QLaZgCvz+D55MnkaI+aWBRC
 2lC++u3ucZmDI2SyMTKvGWUK
 -----END PRIVATE KEY-----`;
 
-const corsHeaders = {
+const CORS = {
   'Content-Type': 'application/json',
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'Content-Type',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
 };
 
-// 產生 JWT token
-async function getAccessToken() {
+async function getToken() {
   const now = Math.floor(Date.now() / 1000);
-  const header = { alg: 'RS256', typ: 'JWT' };
-  const payload = {
+  const enc = obj => btoa(JSON.stringify(obj)).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');
+  const input = `${enc({alg:'RS256',typ:'JWT'})}.${enc({
     iss: CLIENT_EMAIL,
     scope: 'https://www.googleapis.com/auth/spreadsheets',
     aud: 'https://oauth2.googleapis.com/token',
-    exp: now + 3600,
-    iat: now,
-  };
-
-  const encode = obj => btoa(JSON.stringify(obj)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
-  const signingInput = `${encode(header)}.${encode(payload)}`;
-
-  // Import private key
-  const keyData = PRIVATE_KEY.replace(/-----BEGIN PRIVATE KEY-----/, '')
-    .replace(/-----END PRIVATE KEY-----/, '')
-    .replace(/\n/g, '');
-  const binaryKey = Uint8Array.from(atob(keyData), c => c.charCodeAt(0));
-  const cryptoKey = await crypto.subtle.importKey(
-    'pkcs8', binaryKey,
-    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-    false, ['sign']
+    exp: now + 3600, iat: now,
+  })}`;
+  const key = PRIVATE_KEY.replace(/-----[^-]+-----/g,'').replace(/\n/g,'');
+  const ck = await crypto.subtle.importKey(
+    'pkcs8', Uint8Array.from(atob(key), c=>c.charCodeAt(0)),
+    { name:'RSASSA-PKCS1-v1_5', hash:'SHA-256' }, false, ['sign']
   );
-
-  const signature = await crypto.subtle.sign(
-    'RSASSA-PKCS1-v1_5', cryptoKey,
-    new TextEncoder().encode(signingInput)
-  );
-
-  const jwt = `${signingInput}.${btoa(String.fromCharCode(...new Uint8Array(signature))).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')}`;
-
-  const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
+  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', ck, new TextEncoder().encode(input));
+  const jwt = `${input}.${btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_')}`;
+  const r = await fetch('https://oauth2.googleapis.com/token', {
+    method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:`grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
   });
-  const tokenData = await tokenResp.json();
-  return tokenData.access_token;
+  return (await r.json()).access_token;
 }
 
 exports.handler = async function(event) {
-  if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 200, headers: corsHeaders, body: '' };
-  }
+  if (event.httpMethod === 'OPTIONS') return { statusCode:200, headers:CORS, body:'' };
 
   try {
-    const token = await getAccessToken();
+    const token = await getToken();
     const action = event.queryStringParameters?.action || 'read';
+    const base = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}`;
+    const auth = { Authorization: `Bearer ${token}` };
 
-    // 讀取資料
     if (action === 'read') {
-      const [holdingsResp, tradesResp] = await Promise.all([
-        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/%E6%8C%81%E5%80%89!A2:D`, {
-          headers: { Authorization: `Bearer ${token}` }
-        }),
-        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/%E4%BA%A4%E6%98%93%E8%A8%98%E9%8C%84!A2:E`, {
-          headers: { Authorization: `Bearer ${token}` }
-        }),
+      const [hr, tr] = await Promise.all([
+        fetch(`${base}/values/holdings!A2:D`, { headers: auth }),
+        fetch(`${base}/values/trades!A2:E`, { headers: auth }),
       ]);
+      const hd = await hr.json();
+      const td = await tr.json();
 
-      const holdingsData = await holdingsResp.json();
-      const tradesData = await tradesResp.json();
-
-      const holdings = (holdingsData.values || []).map(row => ({
-        cd: row[0] || '',
-        name: row[1] || '',
-        sh: parseFloat(row[2]) || 0,
-        buy: parseFloat(row[3]) || 0,
-      })).filter(h => h.cd);
-
-      const trades = (tradesData.values || []).map(row => ({
-        dt: row[0] || '',
-        cd: row[1] || '',
-        tp: row[2] || 'buy',
-        sh: parseFloat(row[3]) || 0,
-        am: parseFloat(row[4]) || 0,
-      })).filter(t => t.cd);
-
-      return {
-        statusCode: 200,
-        headers: corsHeaders,
-        body: JSON.stringify({ success: true, holdings, trades }),
-      };
+      return { statusCode:200, headers:CORS, body: JSON.stringify({
+        success: true,
+        holdings: (hd.values||[]).map(r=>({ cd:r[0]||'', name:r[1]||'', sh:parseFloat(r[2])||0, buy:parseFloat(r[3])||0 })).filter(h=>h.cd),
+        trades:   (td.values||[]).map(r=>({ dt:r[0]||'', cd:r[1]||'', tp:r[2]||'buy', sh:parseFloat(r[3])||0, am:parseFloat(r[4])||0 })).filter(t=>t.cd),
+      })};
     }
 
-    // 寫入資料
     if (action === 'write') {
-      const body = JSON.parse(event.body || '{}');
-      const { holdings, trades } = body;
+      const { holdings=[], trades=[] } = JSON.parse(event.body||'{}');
 
-      if (!holdings || !trades) {
-        return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ success: false, error: '缺少資料' }) };
-      }
-
-      const holdingValues = holdings.map(h => [h.cd || '', h.name || '', h.sh || 0, h.buy || 0]);
-      const tradeValues = trades.map(t => [t.dt || '', t.cd || '', t.tp || 'buy', t.sh || 0, t.am || 0]);
-
-      // 先取得工作表的實際 sheetId
-      const metaResp = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}?fields=sheets.properties`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      const meta = await metaResp.json();
+      // 取得 sheetId
+      const meta = await (await fetch(`${base}?fields=sheets.properties`, { headers: auth })).json();
       const sheetMap = {};
-      (meta.sheets || []).forEach(s => { sheetMap[s.properties.title] = s.properties.sheetId; });
+      (meta.sheets||[]).forEach(s => { sheetMap[s.properties.title] = s.properties.sheetId; });
 
-      const holdingSheetId = sheetMap['持倉'];
-      const tradeSheetId = sheetMap['交易記錄'];
-      if (holdingSheetId === undefined || tradeSheetId === undefined) {
-        throw new Error(`找不到工作表，現有：${Object.keys(sheetMap).join(', ')}`);
+      const hId = sheetMap['holdings'];
+      const tId = sheetMap['trades'];
+      if (hId === undefined || tId === undefined) {
+        throw new Error(`找不到工作表 holdings/trades，現有：${Object.keys(sheetMap).join(', ')}`);
       }
 
-      // 使用 batchUpdate 清空後再用 values API 寫入（用 sheetId 定位）
-      const batchClear = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}:batchUpdate`,
-        {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            requests: [
-              { updateCells: { range: { sheetId: holdingSheetId, startRowIndex: 1 }, fields: 'userEnteredValue' } },
-              { updateCells: { range: { sheetId: tradeSheetId, startRowIndex: 1 }, fields: 'userEnteredValue' } },
-            ]
-          }),
-        }
-      );
-      if (!batchClear.ok) {
-        const e = await batchClear.json();
-        throw new Error(`清空失敗: ${JSON.stringify(e)}`);
-      }
+      // batchUpdate：先清空再寫入
+      const makeRows = arr => arr.map(row => ({
+        values: row.map(v => typeof v === 'number'
+          ? { userEnteredValue: { numberValue: v } }
+          : { userEnteredValue: { stringValue: String(v||'') } })
+      }));
 
-      // 寫入持倉
-      if (holdingValues.length > 0) {
-        const wr = await fetch(
-          `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchUpdate`,
-          {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              valueInputOption: 'RAW',
-              data: [
-                { range: `Sheet${holdingSheetId+1}!A2`, values: holdingValues },
-                { range: `Sheet${tradeSheetId+1}!A2`, values: tradeValues },
-              ]
-            }),
-          }
-        );
-      }
+      const hRows = makeRows(holdings.map(h => [h.cd, h.name, h.sh, h.buy]));
+      const tRows = makeRows(trades.map(t => [t.dt, t.cd, t.tp, t.sh, t.am]));
 
-      // 用 sheetId 方式寫入（更可靠）
-      const writeBySheetId = async (sheetId, values) => {
-        if (!values.length) return;
-        const rows = values.map(row => ({
-          values: row.map(v => ({ userEnteredValue: typeof v === 'number' ? { numberValue: v } : { stringValue: String(v) } }))
-        }));
-        const resp = await fetch(
-          `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}:batchUpdate`,
-          {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              requests: [{
-                updateCells: {
-                  start: { sheetId, rowIndex: 1, columnIndex: 0 },
-                  rows,
-                  fields: 'userEnteredValue',
-                }
-              }]
-            }),
-          }
-        );
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(`寫入失敗: ${JSON.stringify(data)}`);
-      };
+      const requests = [
+        // 清空
+        { updateCells: { range: { sheetId: hId, startRowIndex: 1 }, fields: 'userEnteredValue' } },
+        { updateCells: { range: { sheetId: tId, startRowIndex: 1 }, fields: 'userEnteredValue' } },
+      ];
 
-      await writeBySheetId(holdingSheetId, holdingValues);
-      await writeBySheetId(tradeSheetId, tradeValues);
+      // 寫入（若有資料）
+      if (hRows.length) requests.push({ updateCells: { start: { sheetId: hId, rowIndex: 1, columnIndex: 0 }, rows: hRows, fields: 'userEnteredValue' } });
+      if (tRows.length) requests.push({ updateCells: { start: { sheetId: tId, rowIndex: 1, columnIndex: 0 }, rows: tRows, fields: 'userEnteredValue' } });
 
-      return {
-        statusCode: 200,
-        headers: corsHeaders,
-        body: JSON.stringify({ success: true, saved: { holdings: holdingValues.length, trades: tradeValues.length } }),
-      };
+      const wr = await fetch(`${base}:batchUpdate`, {
+        method: 'POST',
+        headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requests }),
+      });
+      const wd = await wr.json();
+      if (!wr.ok) throw new Error(`batchUpdate 失敗: ${JSON.stringify(wd.error)}`);
+
+      return { statusCode:200, headers:CORS, body: JSON.stringify({ success:true, saved:{ holdings:hRows.length, trades:tRows.length } }) };
     }
 
   } catch(err) {
-    return {
-      statusCode: 500,
-      headers: corsHeaders,
-      body: JSON.stringify({ success: false, error: err.message }),
-    };
+    return { statusCode:500, headers:CORS, body: JSON.stringify({ success:false, error:err.message }) };
   }
 };
