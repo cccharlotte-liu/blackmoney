@@ -90,10 +90,10 @@ exports.handler = async function(event) {
     // 讀取資料
     if (action === 'read') {
       const [holdingsResp, tradesResp] = await Promise.all([
-        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent("'持倉'!A2:D")}`, {
+        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/%E6%8C%81%E5%80%89!A2:D`, {
           headers: { Authorization: `Bearer ${token}` }
         }),
-        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent("'交易記錄'!A2:E")}`, {
+        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/%E4%BA%A4%E6%98%93%E8%A8%98%E9%8C%84!A2:E`, {
           headers: { Authorization: `Bearer ${token}` }
         }),
       ]);
@@ -135,43 +135,86 @@ exports.handler = async function(event) {
       const holdingValues = holdings.map(h => [h.cd || '', h.name || '', h.sh || 0, h.buy || 0]);
       const tradeValues = trades.map(t => [t.dt || '', t.cd || '', t.tp || 'buy', t.sh || 0, t.am || 0]);
 
-      const writeRange = async (sheetName, range, values) => {
-        // 中文工作表名稱需加單引號並 encode
-        const fullRange = encodeURIComponent(`'${sheetName}'!${range}`);
+      // 先取得工作表的實際 sheetId
+      const metaResp = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}?fields=sheets.properties`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const meta = await metaResp.json();
+      const sheetMap = {};
+      (meta.sheets || []).forEach(s => { sheetMap[s.properties.title] = s.properties.sheetId; });
 
-        // 先清空
-        const clearResp = await fetch(
-          `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${fullRange}:clear`,
+      const holdingSheetId = sheetMap['持倉'];
+      const tradeSheetId = sheetMap['交易記錄'];
+      if (holdingSheetId === undefined || tradeSheetId === undefined) {
+        throw new Error(`找不到工作表，現有：${Object.keys(sheetMap).join(', ')}`);
+      }
+
+      // 使用 batchUpdate 清空後再用 values API 寫入（用 sheetId 定位）
+      const batchClear = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}:batchUpdate`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            requests: [
+              { updateCells: { range: { sheetId: holdingSheetId, startRowIndex: 1 }, fields: 'userEnteredValue' } },
+              { updateCells: { range: { sheetId: tradeSheetId, startRowIndex: 1 }, fields: 'userEnteredValue' } },
+            ]
+          }),
+        }
+      );
+      if (!batchClear.ok) {
+        const e = await batchClear.json();
+        throw new Error(`清空失敗: ${JSON.stringify(e)}`);
+      }
+
+      // 寫入持倉
+      if (holdingValues.length > 0) {
+        const wr = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchUpdate`,
           {
             method: 'POST',
             headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
+            body: JSON.stringify({
+              valueInputOption: 'RAW',
+              data: [
+                { range: `Sheet${holdingSheetId+1}!A2`, values: holdingValues },
+                { range: `Sheet${tradeSheetId+1}!A2`, values: tradeValues },
+              ]
+            }),
           }
         );
-        const clearData = await clearResp.json();
-        if (!clearResp.ok) throw new Error(`清空失敗: ${JSON.stringify(clearData)}`);
+      }
 
-        // 若有資料則寫入
-        if (values.length > 0) {
-          const writeResp = await fetch(
-            `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${fullRange}?valueInputOption=RAW`,
-            {
-              method: 'PUT',
-              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ range: `'${sheetName}'!${range}`, values }),
-            }
-          );
-          const writeData = await writeResp.json();
-          if (!writeResp.ok) throw new Error(`寫入失敗: ${JSON.stringify(writeData)}`);
-          return writeData;
-        }
-        return clearData;
+      // 用 sheetId 方式寫入（更可靠）
+      const writeBySheetId = async (sheetId, values) => {
+        if (!values.length) return;
+        const rows = values.map(row => ({
+          values: row.map(v => ({ userEnteredValue: typeof v === 'number' ? { numberValue: v } : { stringValue: String(v) } }))
+        }));
+        const resp = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}:batchUpdate`,
+          {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              requests: [{
+                updateCells: {
+                  start: { sheetId, rowIndex: 1, columnIndex: 0 },
+                  rows,
+                  fields: 'userEnteredValue',
+                }
+              }]
+            }),
+          }
+        );
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(`寫入失敗: ${JSON.stringify(data)}`);
       };
 
-      const [h, t] = await Promise.all([
-        writeRange('持倉', 'A2:D1000', holdingValues),
-        writeRange('交易記錄', 'A2:E10000', tradeValues),
-      ]);
+      await writeBySheetId(holdingSheetId, holdingValues);
+      await writeBySheetId(tradeSheetId, tradeValues);
 
       return {
         statusCode: 200,
