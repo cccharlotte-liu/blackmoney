@@ -522,8 +522,7 @@ function renderAll(){ renderKPIs(); renderOverview(); renderHoldings(); }
 
 // ── 初始化 ──
 document.getElementById('fDate').value = new Date().toISOString().slice(0,10);
-loadFromSheets();
-updatePrices();
+loadFromSheets().then(() => updatePrices());
 </script>
 </body>
 </html>
