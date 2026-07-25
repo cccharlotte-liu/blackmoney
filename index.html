@@ -281,19 +281,18 @@ async function updatePrices(){
   checkEl.style.display = 'flex';
 
   try {
-    // 取得所有持倉代號
+    // 取得所有持倉代號，逐一查詢
     const codes = [...new Set(HOLDINGS.map(h=>h.cd))];
-    const tse = codes.filter(c=>!['00878','00403A'].includes(c)).map(c=>`tse_${c}.tw`).join('|');
-    const otc = codes.filter(c=>['00878','00403A'].includes(c)).map(c=>`otc_${c}.tw`).join('|');
+    const prices = {};
 
+    // 先批次查詢
     const resp = await fetch('/.netlify/functions/get-stock-price');
-    if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = await resp.json();
-    if(!data.success) throw new Error(data.error||'無股價資料');
+    if(resp.ok){
+      const data = await resp.json();
+      if(data.success) Object.assign(prices, data.prices||{});
+    }
 
-    const prices = data.prices || {};
-
-    // 動態查詢不在預設清單的代號
+    // 持倉裡沒查到的再個別查詢
     for(const cd of codes){
       if(!prices[cd]){
         try {
@@ -303,6 +302,8 @@ async function updatePrices(){
         } catch(e){}
       }
     }
+
+    if(Object.keys(prices).length === 0) throw new Error('無股價資料');
 
     HOLDINGS.forEach(h => { if(prices[h.cd]) h.tp = prices[h.cd]; });
     renderAll();
