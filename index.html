@@ -222,7 +222,7 @@ async function loadFromSheets(){
     const resp = await fetch('/.netlify/functions/sheets?action=read');
     const data = await resp.json();
     if(data.success){
-      HOLDINGS = data.holdings || [];
+      HOLDINGS = (data.holdings || []).map(h => ({ ...h, tp: h.tp || 0 }));
       TRADES = data.trades || [];
       renderAll();
       renderTrades();
